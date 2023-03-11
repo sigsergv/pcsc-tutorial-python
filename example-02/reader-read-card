@@ -7,7 +7,8 @@ from smartcard.util import toHexString
 def main() -> int:
 	reader = readers()[0]
 	print('Connected reader: {0}'.format(reader))
-	cardrequest = CardRequest(timeout=None)
+	cardrequest = CardRequest(timeout=None, readers=[reader])
+	print('Waiting for the card...')
 	cardservice = cardrequest.waitforcard()
 	cardservice.connection.connect()
 	print('Inserted card with ATR: {0}'.format( toHexString(cardservice.connection.getATR())) )
