@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.util import toHexString
+
+def main() -> int:
+	reader = readers()[0]
+	print('Connected reader: {0}'.format(reader))
+	cardrequest = CardRequest(timeout=None)
+	cardservice = cardrequest.waitforcard()
+	cardservice.connection.connect()
+	print('Inserted card with ATR: {0}'.format( toHexString(cardservice.connection.getATR())) )
+	return 0
+
+if __name__ == '__main__':
+	main()
