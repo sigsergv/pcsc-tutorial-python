@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.util import toHexString
+
+def main() -> int:
+	reader = readers()[0]
+	print('Connected reader: {0}'.format(reader))
+	cardrequest = CardRequest(timeout=None, readers=[reader])
+	print('Waiting for the card...')
+	cardservice = cardrequest.waitforcard()
+	cardservice.connection.connect()
+	
+	apdu = [0xFF, 0xCA, 0x00, 0x00, 0x00]
+	response, sw1, sw2 = cardservice.connection.transmit(apdu)
+
+	print('Status word: ', toHexString([sw1, sw2]))
+	print('Response:', toHexString(response))
+
+	return 0
+
+if __name__ == '__main__':
+	main()
