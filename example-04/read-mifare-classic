@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+
+from time import sleep
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString
+
+def main() -> int:
+	reader = readers()[0]
+	print('Connected reader: {0}'.format(reader))
+	cardrequest = CardRequest(timeout=None, readers=[reader])
+	print('Waiting for Mifare Classic 1K card...')
+
+	cardservice = cardrequest.waitforcard()
+	cardservice.connection.connect()
+
+	print('Card connected')
+
+	keys = [
+		[0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0],
+		[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+		[0xA1, 0xB1, 0xC1, 0xD1, 0xE1, 0xF1],
+		[0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5],
+		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+	]
+	authenticated = False
+	for key in keys:
+		# 1. load key
+		#       CLA   INS   P1    P2    Lc      Data (6 bytes)
+		apdu = [0xFF, 0x82, 0x00, 0x00, 0x06] + key
+		response, sw1, sw2 = cardservice.connection.transmit(apdu)
+		if (sw1,sw2) != (0x90,0x00):
+			print('Mifare Load Key failed for key {}'.format(toHexString(key)))
+			continue
+
+		# 2. authentication
+		#       CLA   INS   P1    P2    Lc    Data
+		apdu = [0xFF, 0x86, 0x00, 0x00, 0x05, 0x01, 0x00, 0x00, 0x60, 0x00]
+		response, sw1, sw2 = cardservice.connection.transmit(apdu)
+		if (sw1,sw2) != (0x90,0x00):
+			print('Mifare Authentication failed with key {}, status word {:02x} {:02x}'.format(toHexString(key), sw1, sw2))
+			sleep(0.1)
+		else:
+			print('Authenticated with key "{}"'.format(toHexString(key)))
+			authenticated = True
+			break
+
+	if not authenticated:
+		print('All keys failed')
+		return 1
+
+	# 3. read data
+	#       CLA   INS   P1    P2    Le
+	apdu = [0xFF, 0xB0, 0x00, 0x00, 0x10]
+	response, sw1, sw2 = cardservice.connection.transmit(apdu)
+	if (sw1,sw2) != (0x90,0x00):
+		print('Mifare read data failed, status word {:02x} {:02x}'.format(sw1, sw2))
+		return 1
+
+	print('Got response:', toHexString(response))
+
+	return 0
+
+if __name__ == '__main__':
+	main()
