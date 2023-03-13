@@ -13,7 +13,7 @@ def main() -> int:
 	cardservice = cardrequest.waitforcard()
 	cardservice.connection.connect()
 	
-	apdu = [0xFF, 0xCA, 0x00, 0x00, 0x00]
+	apdu = [0xFF, 0xCA, 0xAB, 0xCD, 0x00]
 	response, sw1, sw2 = cardservice.connection.transmit(apdu)
 
 	print('Status word: ', toHexString([sw1, sw2]))
