@@ -40,7 +40,7 @@ def main() -> int:
 		response, sw1, sw2 = cardservice.connection.transmit(apdu)
 		if (sw1,sw2) != (0x90,0x00):
 			print('Mifare Authentication failed with key {}, status word {:02x} {:02x}'.format(toHexString(key), sw1, sw2))
-			sleep(0.1)
+			sleep(2)
 		else:
 			print('Authenticated with key "{}"'.format(toHexString(key)))
 			authenticated = True
