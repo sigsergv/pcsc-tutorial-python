@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.util import toHexString, toBytes
+
+
+def main() -> int:
+	reader = readers()[0]
+	print('Connected reader: {0}'.format(reader))
+	cardrequest = CardRequest(timeout=None, readers=[reader])
+	print('Waiting for card...')
+
+	cardservice = cardrequest.waitforcard()
+	cardservice.connection.connect()
+
+	print('Card connected')
+
+	atr = cardservice.connection.getATR()
+
+	# check ATR header, it must be 3B
+	if atr[0] != 0x3B:
+		print('Not supported card, exiting')
+		return 1
+
+	# extract length of Historical bytes field
+	hb_len = atr[1] & 0xF
+
+	# extract Historical bytes
+	hb = atr[4:hb_len+4]
+
+	if hb[:2] != [0x80, 0x4F]:
+		print('Unsupported card type')
+		return 1
+
+	if hb[3:8] != [0xA0, 0x00, 0x00, 0x03, 0x06]:
+		print('Unsupported card type')
+		return 1
+
+	standard_byte = hb[8]
+	cardname_bytes = hb[9:11]
+
+	if standard_byte not in KNOWN_STANDARDS:
+		print('Unknown standard')
+		return 1
+	print('Card standard:', KNOWN_STANDARDS[standard_byte])
+
+	cardname_word = 256*cardname_bytes[0] + cardname_bytes[1]
+	if cardname_word not in KNOWN_CARD_NAMES:
+		print('Unknown card name:', toHexString(cardname_bytes))
+		return 1
+	print('Card name:', KNOWN_CARD_NAMES[cardname_word])
+
+	return 0
+
+
+# see PC/SC, Interoperability Specification for ICCs and Personal Computer Systems Part 3. Supplemental Document
+KNOWN_STANDARDS = {
+	1: 'ISO 14443 A, part 1',
+	2: 'ISO 14443 A, part 2',
+	3: 'ISO 14443 A, part 3',
+	# 4: 'RFU'
+	5: 'ISO 14443 B, part 1',
+	6: 'ISO 14443 B, part 2',
+	7: 'ISO 14443 B, part 3',
+	# 8: 'RFU'
+	9: 'ISO 15693, part 1',
+	10: 'ISO 15693, part 2',
+	11: 'ISO 15693, part 3',
+	12: 'ISO 15693, part 4',
+	13: 'Contact (7816-10) I2C',
+	14: 'Contact (7816-10) Extended I2C',
+	15: 'Contact (7816-10) 2WBP',
+	16: 'Contact (7816-10) 3WBP',
+	17: 'FeliCa',
+	# RFU
+	64: 'Low frequency contactless cards'
+	# RFU
+}
+
+KNOWN_CARD_NAMES = {
+	0x0000: 'No information given',
+	0x0001: 'Mifare Standard 1K',
+	0x0002: 'Mifare Standard 4K',
+	0x0003: 'Mifare Ultra light',
+	0x0004: 'SLE55R_XXXX',
+	0x0006: 'SR176',
+	0x0007: 'SRI X4K',
+	0x0008: 'AT88RF020',
+	0x0009: 'AT88SC0204CRF',
+	0x000A: 'AT88SC0808CRF',
+	0x000B: 'AT88SC1616CRF',
+	0x000C: 'AT88SC3216CRF',
+	0x000D: 'AT88SC6416CRF',
+	0x000E: 'SRF55V10P',
+	0x000F: 'SRF55V02P',
+	0x0010: 'SRF55V10S',
+	0x0011: 'SRF55V02S',
+	0x0012: 'TAG_IT',
+	0x0013: 'LRI512',
+	0x0014: 'ICODESLI',
+	0x0015: 'TEMPSENS',
+	0x0016: 'I.CODE1',
+	0x0017: 'PicoPass 2K',
+	0x0018: 'PicoPass 2KS',
+	0x0019: 'PicoPass 16K',
+	0x001A: 'PicoPass 16Ks',
+	0x001B: 'PicoPass 16K(8x2)',
+	0x001C: 'PicoPass 16KS(8x2)',
+	0x001D: 'PicoPass 32KS(16+16)',
+	0x001E: 'PicoPass 32KS(16+8x2)',
+	0x001F: 'PicoPass 32KS(8x2+16)',
+	0x0020: 'PicoPass 32KS(8x2+8x2)',
+	0x0021: 'LRI64',
+	0x0022: 'I.CODE UID',
+	0x0023: 'I.CODE EPC',
+	0x0024: 'LRI12',
+	0x0025: 'LRI128',
+	0x0026: 'Mifare Mini',
+	0x0027: 'my-d move (SLE 66R01P)',
+	0x0028: 'my-d NFC (SLE 66RxxP)',
+	0x0029: 'my-d proximity 2 (SLE 66RxxS)',
+	0x002A: 'my-d proximity enhanced (SLE 55RxxE)',
+	0x002B: 'my-d light (SRF 55V01P))',
+	0x002C: 'PJM Stack Tag (SRF 66V10ST)',
+	0x002D: 'PJM Item Tag (SRF 66V10IT)',
+	0x002E: 'PJM Light (SRF 66V01ST)',
+	0x002F: 'Jewel Tag',
+	0x0030: 'Topaz NFC Tag',
+	0x0031: 'AT88SC0104CRF',
+	0x0032: 'AT88SC0404CRF',
+	0x0033: 'AT88RF01C',
+	0x0034: 'AT88RF04C',
+	0x0035: 'i-Code SL2',
+	0x0036: 'MIFARE Plus SL1_2K',
+	0x0037: 'MIFARE Plus SL1_4K',
+	0x0038: 'MIFARE Plus SL2_2K',
+	0x0039: 'MIFARE Plus SL2_4K',
+	0x003A: 'MIFARE Ultralight C',
+	0x003B: 'FeliCa',
+	0x003C: 'Melexis Sensor Tag (MLX90129)',
+	0x003D: 'MIFARE Ultralight EV1'
+	
+}
+
+
+if __name__ == '__main__':
+	main()
