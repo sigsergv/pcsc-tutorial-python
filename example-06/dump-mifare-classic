@@ -32,13 +32,12 @@ def main() -> int:
 		"A0 A1 A2 A3 A4 A5",
 		"B0 B1 B2 B3 B4 B5",
 
-		"F1 F2 F3 F4 F5 F6",
-		"AA BB CC DD EE FF"
+		"F1 F2 F3 F4 F5 F6"
 	]
 
-	data = []
-	found_keys = []  # each element is tuple (Key A, Key B), either could be None
-	acs = []
+	data = []  # blocks data, each element is a list of sector blocks
+	found_keys = []  # each element is a tuple (Key A, Key B), either could be None
+	acs = []  # access conditions for all sectors, each element is a list with AC for every block
 
 	# try to access first 16 sectors
 	for sector in range(16):
@@ -140,7 +139,7 @@ def main() -> int:
 		data.append(sector_data)
 
 		if sector_data[3] != []:
-			# try to decode AC bits again if this block has been read using Key B
+			# try to decode AC bits again if sector trailer has been read using Key B
 			if blocks_access_condition_bits == None:
 				access_conditions_bytes = sector_data[3][6:9]
 				blocks_access_condition_bits = unpack_access_conditions_bits(access_conditions_bytes)
@@ -150,6 +149,7 @@ def main() -> int:
 
 		acs.append(sector_acs)
 
+	# pretty print collected data
 	for i,s in enumerate(data):
 		print('Sector {:02X}'.format(i))
 		for j,b in enumerate(s):
@@ -162,7 +162,6 @@ def main() -> int:
 			print(', Key A: {}'.format('?? ?? ?? ?? ?? ??' if key_a == None else key_a), end='')
 			print(', Key B: {}'.format('?? ?? ?? ?? ?? ??' if key_b == None else key_b), end='')
 			print(', AC: {}'.format(acs[i][j]))
-
 
 
 def unpack_access_conditions_bits(ac_bytes):
