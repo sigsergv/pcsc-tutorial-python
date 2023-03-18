@@ -47,27 +47,29 @@ def main() -> int:
 		key_b = None
 
 		for key in test_keys:
-			# store key data to cell 0
-			apdu = "FF 82 00 00 06 " + key
+			# store key data to the first cell (CellN = P2 = 0)
+			#       CLA INS P1  P2  Lc
+			apdu = "FF  82  00  00  06 " + key
 			response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
 			if (sw1,sw2) != (0x90,0x00):
-				if args.verbose: print('Mifare load key "{}" failed, probably not Mifare compatible card, terminating.'.format(key))
+				print('Load Keys command failed, Key "{}" , probably not Mifare compatible card, terminating.'.format(key))
 				return 1
 
 			# perform authentication for 4th (trailer) block of the sector using stored data as Key A
 			blockMSB = 0
 			blockLSB = sector * 4 + 3  # 4th block
-			#       CLA INS P1 P2 Lc  VER BlockMSB BlockLSB KeyA KeyN
-			apdu = "FF  86  00 00 05  01  {:02X}   {:02X}   60   00".format(blockMSB, blockLSB)
+			#       CLA INS P1  P2  Lc  VER BlockMSB BlockLSB KeyA CellN
+			apdu = "FF  86  00  00  05  01  {:02X}   {:02X}   60   00".format(blockMSB, blockLSB)
 			response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
 			if (sw1,sw2) == (0x90,0x00):
 				if args.verbose: print('Authentication successful with Key A "{}" to block {:02X}, sector {:02X}'.format(key, blockLSB, sector))
 				key_a = key
 				# try to read trailer block content
-				apdu = 'FF B0 {:02X} {:02X} 10'.format(blockMSB, blockLSB)
+				#       CLA INS BlockMSB BlockLSB Le
+				apdu = 'FF  B0  {:02X}   {:02X}   10'.format(blockMSB, blockLSB)
 				response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
 				if (sw1,sw2) != (0x90,0x00):
-					if args.verbose: print('failed to read trailer of sector {:02X}, SW: "{}"'.format(sector, toHexString([sw1,sw2])))
+					if args.verbose: print('Failed to read trailer of sector {:02X}, SW: "{}"'.format(sector, toHexString([sw1,sw2])))
 				else:
 					sector_data[3] = response
 					access_conditions_bytes = response[6:9]
@@ -76,12 +78,13 @@ def main() -> int:
 					if can_read_key_b_bytes(blocks_access_condition_bits[3]):
 						key_b = toHexString(response[10:])  # last 6 bytes is Key B
 
-					# try to read first 3 sector blocks if access conditions allow
+					# try to read first three blocks of the sector if access conditions allow
 					for sector_block in range(3):
 						if can_read_block_with_key_a(blocks_access_condition_bits[sector_block]):
 							blockMSB = 0
 							blockLSB = sector * 4 + sector_block
-							apdu = 'FF B0 {:02X} {:02X} 10'.format(blockMSB, blockLSB)
+							#       CLA INS BlockMSB BlockLSB Le
+							apdu = 'FF  B0  {:02X}   {:02X}   10'.format(blockMSB, blockLSB)
 							response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
 							if (sw1,sw2) != (0x90,0x00):
 								if args.verbose: print('Failed to read block {:02X} with Key A, SW: {}'.format(blockLSB, toHexString([sw1,sw2])))
@@ -96,13 +99,13 @@ def main() -> int:
 				apdu = "FF 82 00 00 06 " + key
 				response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
 				if (sw1,sw2) != (0x90,0x00):
-					print('Mifare load key "{}" failed, probably not Mifare compatible card, terminating.'.format(key))
+					print('Load Keys command failed, Key "{}" , probably not Mifare compatible card, terminating.'.format(key))
 					return 1
 
 				# perform authentication for 4th (trailer) block of the sector using stored data as Key B
 				blockMSB = 0
 				blockLSB = sector * 4 + 3  # 4th block
-				#       CLA INS P1 P2 Lc  VER BlockMSB BlockLSB KeyA KeyN
+				#       CLA INS P1 P2 Lc  VER BlockMSB BlockLSB KeyA CellN
 				apdu = "FF  86  00 00 05  01  {:02X}   {:02X}   61   00".format(blockMSB, blockLSB)
 				response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
 				if (sw1,sw2) == (0x90,0x00):
@@ -120,11 +123,13 @@ def main() -> int:
 						if auth_discarded:
 							# authenticate again, it's required because Mifare chip discards previous
 							# authentication after any error
+							#       CLA INS P1 P2 Lc  VER BlockMSB BlockLSB KeyA CellN
 							apdu = "FF  86  00 00 05  01  {:02X}   {:02X}   61   00".format(blockMSB, blockLSB)
 							response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
 							# ignore errors because ACR122U returns 63 00 here for some reason 
 
-						apdu = 'FF B0 {:02X} {:02X} 10'.format(blockMSB, blockLSB)
+						#       CLA INS BlockMSB BlockLSB Le
+						apdu = 'FF  B0  {:02X}   {:02X}   10'.format(blockMSB, blockLSB)
 						response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
 						if (sw1,sw2) != (0x90,0x00):
 							auth_discarded = True
