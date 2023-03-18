@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+
+from time import sleep
+from argparse import ArgumentParser
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes
+
+READ_TIMEOUT = 0.1
+
+def main() -> int:
+	parser = ArgumentParser()
+	parser.add_argument('--verbose', action='store_true')
+	args = parser.parse_args()
+
+	reader = readers()[0]
+	print('Connected reader: {0}'.format(reader))
+	cardrequest = CardRequest(timeout=None, readers=[reader])
+	print('Waiting for Mifare Classic 1K/4K card...')
+
+	cardservice = cardrequest.waitforcard()
+	cardservice.connection.connect()
+
+	print('Card connected, reading data, please wait...')
+
+	test_keys = [
+		"A0 B0 C0 D0 E0 F0",
+		"FF FF FF FF FF FF",
+		"00 00 00 00 00 00",
+		"D3 F7 D3 F7 D3 F7",
+		"A0 A1 A2 A3 A4 A5",
+		"B0 B1 B2 B3 B4 B5",
+
+		"F1 F2 F3 F4 F5 F6",
+		"AA BB CC DD EE FF"
+	]
+
+	data = []
+	found_keys = []  # each element is tuple (Key A, Key B), either could be None
+	acs = []
+
+	# try to access first 16 sectors
+	for sector in range(16):
+		sector_data = [[],[],[],[]]
+		blocks_access_condition_bits = None
+		key_a = None
+		key_b = None
+
+		for key in test_keys:
+			# store key data to cell 0
+			apdu = "FF 82 00 00 06 " + key
+			response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+			if (sw1,sw2) != (0x90,0x00):
+				if args.verbose: print('Mifare load key "{}" failed, probably not Mifare compatible card, terminating.'.format(key))
+				return 1
+
+			# perform authentication for 4th (trailer) block of the sector using stored data as Key A
+			blockMSB = 0
+			blockLSB = sector * 4 + 3  # 4th block
+			#       CLA INS P1 P2 Lc  VER BlockMSB BlockLSB KeyA KeyN
+			apdu = "FF  86  00 00 05  01  {:02X}   {:02X}   60   00".format(blockMSB, blockLSB)
+			response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+			if (sw1,sw2) == (0x90,0x00):
+				if args.verbose: print('Authentication successful with Key A "{}" to block {:02X}, sector {:02X}'.format(key, blockLSB, sector))
+				key_a = key
+				# try to read trailer block content
+				apdu = 'FF B0 {:02X} {:02X} 10'.format(blockMSB, blockLSB)
+				response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+				if (sw1,sw2) != (0x90,0x00):
+					if args.verbose: print('failed to read trailer of sector {:02X}, SW: "{}"'.format(sector, toHexString([sw1,sw2])))
+				else:
+					sector_data[3] = response
+					access_conditions_bytes = response[6:9]
+					blocks_access_condition_bits = unpack_access_conditions_bits(access_conditions_bytes)
+
+					if can_read_key_b_bytes(blocks_access_condition_bits[3]):
+						key_b = toHexString(response[10:])  # last 6 bytes is Key B
+
+					# try to read first 3 sector blocks if access conditions allow
+					for sector_block in range(3):
+						if can_read_block_with_key_a(blocks_access_condition_bits[sector_block]):
+							blockMSB = 0
+							blockLSB = sector * 4 + sector_block
+							apdu = 'FF B0 {:02X} {:02X} 10'.format(blockMSB, blockLSB)
+							response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+							if (sw1,sw2) != (0x90,0x00):
+								if args.verbose: print('Failed to read block {:02X} with Key A, SW: {}'.format(blockLSB, toHexString([sw1,sw2])))
+							else:
+								sector_data[sector_block] = response
+				break
+
+		if key_b == None:
+			# try to find Key B
+			for key in test_keys:
+				# store key data to cell 0
+				apdu = "FF 82 00 00 06 " + key
+				response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+				if (sw1,sw2) != (0x90,0x00):
+					print('Mifare load key "{}" failed, probably not Mifare compatible card, terminating.'.format(key))
+					return 1
+
+				# perform authentication for 4th (trailer) block of the sector using stored data as Key B
+				blockMSB = 0
+				blockLSB = sector * 4 + 3  # 4th block
+				#       CLA INS P1 P2 Lc  VER BlockMSB BlockLSB KeyA KeyN
+				apdu = "FF  86  00 00 05  01  {:02X}   {:02X}   61   00".format(blockMSB, blockLSB)
+				response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+				if (sw1,sw2) == (0x90,0x00):
+					if args.verbose: print('Authentication successful with Key B "{}" to block {:02X}, sector {:02X}'.format(key, blockLSB, sector))
+					key_b = key
+					# try to read each sector block if it's not read already
+					auth_discarded = False
+					for sector_block in reversed(range(4)):
+						if sector_data[sector_block] != []:
+							continue
+
+						blockMSB = 0
+						blockLSB = sector * 4 + sector_block
+
+						if auth_discarded:
+							# authenticate again, it's required because Mifare chip discards previous
+							# authentication after any error
+							apdu = "FF  86  00 00 05  01  {:02X}   {:02X}   61   00".format(blockMSB, blockLSB)
+							response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+							# ignore errors because ACR122U returns 63 00 here for some reason 
+
+						apdu = 'FF B0 {:02X} {:02X} 10'.format(blockMSB, blockLSB)
+						response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+						if (sw1,sw2) != (0x90,0x00):
+							auth_discarded = True
+							if args.verbose: print('Failed to read block {:02X} in sector {:02X} with Key B, SW: {}'.format(blockLSB, sector, toHexString([sw1,sw2])))
+						else:
+							auth_discarded = False
+							sector_data[sector_block] = response
+					break
+
+
+		found_keys.append((key_a, key_b))
+		data.append(sector_data)
+
+		if sector_data[3] != []:
+			# try to decode AC bits again if this block has been read using Key B
+			if blocks_access_condition_bits == None:
+				access_conditions_bytes = sector_data[3][6:9]
+				blocks_access_condition_bits = unpack_access_conditions_bits(access_conditions_bytes)
+			sector_acs = [' '.join([str(y) for y in x]) for x in blocks_access_condition_bits]
+		else:
+			sector_acs = ['? ? ?', '? ? ?', '? ? ?', '? ? ?']
+
+		acs.append(sector_acs)
+
+	for i,s in enumerate(data):
+		print('Sector {:02X}'.format(i))
+		for j,b in enumerate(s):
+			key_a, key_b = found_keys[i]
+			print('  block {:02X}: '.format(i * 4 + j), end='')
+			if b == []:
+				print('?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ??', end='')
+			else:
+				print(toHexString(b), end='')
+			print(', Key A: {}'.format('?? ?? ?? ?? ?? ??' if key_a == None else key_a), end='')
+			print(', Key B: {}'.format('?? ?? ?? ?? ?? ??' if key_b == None else key_b), end='')
+			print(', AC: {}'.format(acs[i][j]))
+
+
+
+def unpack_access_conditions_bits(ac_bytes):
+	bit = lambda pos, b: ((b >> pos) & 1)
+	#ac0 = ac_bytes[0]  # we don't need that byte
+	ac1 = ac_bytes[1]
+	ac2 = ac_bytes[2]
+	return [
+		[bit(4, ac1), bit(0, ac2), bit(4, ac2)],
+		[bit(5, ac1), bit(1, ac2), bit(5, ac2)],
+		[bit(6, ac1), bit(2, ac2), bit(6, ac2)],
+		[bit(7, ac1), bit(3, ac2), bit(7, ac2)]
+	]
+
+
+def can_read_block_with_key_a(ac_bits):
+	return ac_bits in [ [0,0,0], [0,1,0], [1,0,0], [1,1,0], [0,0,1] ]
+
+
+def can_read_key_b_bytes(ac_bits):
+	return ac_bits in [ [0,0,0], [0,0,1], [0,1,0] ]
+
+
+if __name__ == '__main__':
+	main()

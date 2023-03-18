@@ -55,7 +55,7 @@ def main() -> int:
 	apdu = [0xFF, 0xB0, 0x00, 0x00, 0x10]
 	response, sw1, sw2 = cardservice.connection.transmit(apdu)
 	if (sw1,sw2) != (0x90,0x00):
-		print('Mifare read data failed, status word {:02x} {:02x}'.format(sw1, sw2))
+		print('Mifare read data failed, status word {:02X} {:02X}'.format(sw1, sw2))
 		return 1
 
 	print('Got response:', toHexString(response))
