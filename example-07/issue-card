@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+
+import configparser
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes
+from util import unpack_access_conditions_bits, pack_access_conditions_bits
+
+
+def main() -> int:
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+
+    value_sector = config.getint('DEFAULT', 'value_sector')
+    value_block = config.getint('DEFAULT', 'value_block')
+    original_key_a = config.get('DEFAULT', 'original_key_a')
+    key_a = config.get('DEFAULT', 'key_a')
+    key_b = config.get('DEFAULT', 'key_b')
+
+    reader = readers()[0]
+    print('Connected reader: {0}'.format(reader))
+    cardrequest = CardRequest(timeout=None, readers=[reader])
+    print('Waiting for empty Mifare Classic 1K...')
+    cardservice = cardrequest.waitforcard()
+    cardservice.connection.connect()
+    print('Card connected, checking card, please wait ... ', end='')
+
+    # store original key data to the first cell (CellN = P2 = 0)
+    #       CLA INS P1  P2  Lc
+    apdu = 'FF  82  00  00  06 ' + original_key_a
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Load Keys command failed, probably not Mifare compatible card, terminating.')
+        return 1
+
+    # store key B data to the seconds cell (CellN = P2 = 1)
+    #       CLA INS P1  P2  Lc
+    apdu = 'FF  82  00  01  06 ' + key_b
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Load Keys command failed, probably not Mifare compatible card, terminating.')
+        return 1
+
+    # perform authentication for 4th (trailer) block of the sector using stored data as Key A
+    blockMSB = 0
+    blockLSB = value_sector * 4 + 3  # 4th block
+    #       CLA INS P1  P2  Lc  VER BlockMSB BlockLSB KeyA CellN
+    apdu = 'FF  86  00  00  05  01  {:02X}   {:02X}   60   00'.format(blockMSB, blockLSB)
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('authentication failed for trailer block of sector {:02X}'.format(value_sector))
+        return 1
+
+    # try to read trailer block content
+    #       CLA INS BlockMSB BlockLSB Le
+    apdu = 'FF  B0  {:02X}   {:02X}   10'.format(blockMSB, blockLSB)
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('failed to read sector trailer data')
+        return 1
+    # check access condition, we should be able to change both access keys and write access bits using current Key A
+    # the only bits combination for this is `0 0 1`
+    access_conditions_bits = unpack_access_conditions_bits(response[6:9])
+    if access_conditions_bits[3] != [0, 0, 1]:
+        print('unsuitable access bits')
+        return 1
+    print('done')
+
+    print('Initializing sector trailer ... ', end='')
+    # new access bit for trailer should be `0 1 1` (write Keys A and B using key B, read access bit with both keys, write access bits using Key B)
+    access_conditions_bits[3] = [0, 1, 1]
+    # new access bit for value block should be `1 1 0` (allow read and decrement with key A, all other operations with key B)
+    access_conditions_bits[value_block] = [1, 1, 0]
+    trailer_bytes = toBytes(key_a) + pack_access_conditions_bits(access_conditions_bits) + [0] + toBytes(key_b)
+    # write bytes to trailer block
+    #       CLA INS BlockMSB BlockLSB Lc  DATA
+    apdu = 'FF  D6  00       {:02X}       10 {}'.format(value_sector * 4 + 3, toHexString(trailer_bytes))
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('sector trailer block write failed')
+        return 1
+    print('done')
+
+    print('Re-authenticate using Key B ... ', end='')
+    # perform authentication for 4th (trailer) block of the sector using stored data as Key B
+    blockMSB = 0
+    blockLSB = value_sector * 4 + 3  # 4th block
+    #       CLA INS P1  P2  Lc  VER BlockMSB BlockLSB KeyB CellN
+    apdu = 'FF  86  00  00  05  01  {:02X}   {:02X}   61   01'.format(blockMSB, blockLSB)
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('authentication failed for trailer block of sector {:02X}'.format(value_sector))
+        return 1
+    print('done')
+
+    print('Initializing value block ... ', end='')
+    balance = 0
+    nb = toHexString(list(balance.to_bytes(4)))
+    # write balance (0) to value block
+    #       CLA INS P1 P2     Lc VB_OP ValueMSB...LSB
+    apdu = 'FF  D7  00 {:02X} 05 00    '.format(value_sector * 4 + value_block) + nb
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('value block write failed')
+        return 1
+    print('done')
+
+
+
+if __name__ == '__main__':
+    main()

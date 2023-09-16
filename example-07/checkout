@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+
+import configparser
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes
+from util import unpack_access_conditions_bits, pack_access_conditions_bits
+
+
+def main() -> int:
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+
+    value_sector = config.getint('DEFAULT', 'value_sector')
+    value_block = config.getint('DEFAULT', 'value_block')
+    single_checkout_value = config.getint('DEFAULT', 'single_checkout_value')
+    original_key_a = config.get('DEFAULT', 'original_key_a')
+    key_a = config.get('DEFAULT', 'key_a')
+
+    reader = readers()[0]
+    print('Connected reader: {0}'.format(reader))
+    cardrequest = CardRequest(newcardonly=True, timeout=None, readers=[reader])
+
+    while True:
+        print('Waiting for empty Mifare Classic 1K...')
+        cardservice = cardrequest.waitforcard()
+        cardservice.connection.connect()
+        print('Card connected, checking card, please wait ... ', end='')
+
+        # store key data to the first cell (CellN = P2 = 0)
+        #       CLA INS P1  P2  Lc
+        apdu = 'FF  82  00  00  06 ' + key_a
+        response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+        if (sw1,sw2) != (0x90,0x00):
+            print('Load Keys command failed, probably not Mifare compatible card, terminating.')
+            continue
+
+        # perform authentication for 4th (trailer) block of the sector using stored data as Key A
+        blockMSB = 0
+        blockLSB = value_sector * 4 + 3  # 4th block
+        #       CLA INS P1  P2  Lc  VER BlockMSB BlockLSB KeyA CellN
+        apdu = 'FF  86  00  00  05  01  {:02X}   {:02X}   60   00'.format(blockMSB, blockLSB)
+        response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+        if (sw1,sw2) != (0x90,0x00):
+            print('authentication failed for trailer block of sector {:02X}'.format(value_sector))
+            continue
+        print('done')
+
+        # read balance before checkout
+        blockLSB = value_sector * 4 + value_block
+        #       CLA INS P1 P2     Le
+        apdu = 'FF  B1  00 {:02X} 04'.format(blockLSB)
+        response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+        if (sw1,sw2) != (0x90,0x00):
+            print('authentication failed for trailer block of sector {:02X}'.format(value_sector))
+            continue
+        balance = int.from_bytes(bytes(response))
+        if balance < single_checkout_value:
+            print('Your balance is not enough to checkout {} units, please refill your card.'.format(single_checkout_value))
+            continue
+
+        # checkout
+        print('Debit {} units from your balance ... '.format(single_checkout_value), end='')
+        nb = toHexString(list(single_checkout_value.to_bytes(4)))
+        #       CLA INS P1 P2     Lc VB_OP ValueMSB...LSB
+        apdu = 'FF  D7  00 {:02X} 05 02  '.format(value_sector * 4 + value_block) + nb
+        response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+        if (sw1,sw2) != (0x90,0x00):
+            print('value block decrement failed')
+            continue
+        print('done')
+
+        # read balance
+        blockLSB = value_sector * 4 + value_block
+        #       CLA INS P1 P2     Le
+        apdu = 'FF  B1  00 {:02X} 04'.format(blockLSB)
+        response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+        if (sw1,sw2) != (0x90,0x00):
+            print('authentication failed for trailer block of sector {:02X}'.format(value_sector))
+            continue
+        print('new balance is {} units'.format(int.from_bytes(bytes(response))))
+
+if __name__ == '__main__':
+    main()
