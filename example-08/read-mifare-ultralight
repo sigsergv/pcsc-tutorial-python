@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes, PACK
+
+def main() -> int:
+    reader = readers()[0]
+    print('Connected reader: {0}'.format(reader))
+    cardrequest = CardRequest(timeout=None, readers=[reader])
+    print('Waiting for Mifare Ultralight card ...')
+    cardservice = cardrequest.waitforcard()
+    cardservice.connection.connect()
+    print('Card connected, checking card, please wait ... ', end='')
+
+    page = 0
+    pages = []
+
+    # read first page to check type
+    #       CLA INS P1  P2      Lc
+    apdu = 'FF  B0  00  {:02X}  04'.format(page)
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Read Binary failed, probably not Mifare Ultralight card, terminating.')
+        return 1
+    pages.append(response)
+    page += 1
+    print('done')
+
+    print('Reading pages ', end='')
+
+    # read all pages
+    while True:
+        #       CLA INS P1  P2      Lc
+        apdu = 'FF  B0  00  {:02X}  04'.format(page)
+        response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+        if (sw1,sw2) != (0x90,0x00):
+            break
+        pages.append(response)
+        print('.', end='', flush=True)
+        page += 1
+    print(' {} pages'.format(page))
+
+    # print card details: UID, locking bits
+    uid_bytes = pages[0][0:3] + pages[1]
+    lock_0 = byte_to_bin(pages[2][2])
+    lock_1 = byte_to_bin(pages[2][3])
+    locked_pages = {}
+    for x in range(5):
+        if lock_0[x] == 1:
+            locked_pages[7-x] = True
+    for x in range(8):
+        if lock_1[x] == 1:
+            locked_pages[15-x] = True
+
+    print('UID:', toHexString(uid_bytes, PACK))
+    print('OTP bits:', byte_to_bin(pages[3][0]), byte_to_bin(pages[3][1]), byte_to_bin(pages[3][2]), byte_to_bin(pages[3][3]))
+
+    # pretty print card memory
+    print('Page | Memory bytes | State ')
+    print('-----+--------------+---------')
+    for i,p in enumerate(pages):
+        print('  {:02X} | {}  | '.format(i, toHexString(p)), end='')
+        if locked_pages.get(i, False) == True:
+            print('locked')
+        else:
+            print('')
+
+
+def byte_to_bin(b):
+    regs = []
+    for i in range(8):
+        if b & 1 == 1:
+            regs.append(1)
+        else:
+            regs.append(0)
+        b >>= 1
+    regs.reverse()
+    return regs
+
+if __name__ == '__main__':
+    main()
