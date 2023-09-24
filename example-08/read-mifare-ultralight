@@ -56,6 +56,7 @@ def main() -> int:
 
     print('UID:', toHexString(uid_bytes, PACK))
     print('OTP bits:', byte_to_bin(pages[3][0]), byte_to_bin(pages[3][1]), byte_to_bin(pages[3][2]), byte_to_bin(pages[3][3]))
+    print('Lock bits:', lock_0, lock_1)
 
     # pretty print card memory
     print('Page | Memory bytes | State ')

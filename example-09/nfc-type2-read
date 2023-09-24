@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+
+import tlvt2t
+import ndef
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes, PACK
+
+BLOCK_SIZE = 4
+
+def main() -> int:
+    reader = readers()[0]
+    print('Connected reader: {0}'.format(reader))
+    cardrequest = CardRequest(timeout=None, readers=[reader])
+    print('Waiting for card ...')
+    cardservice = cardrequest.waitforcard()
+    cardservice.connection.connect()
+    print('Card connected.')
+
+    # read block 0x03 - Capability container
+    block = 3
+    #       CLA INS P1  P2      Lc
+    apdu = 'FF  B0  00  {:02X}  04'.format(block)
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Read Binary failed, probably not NFC Type 2 Tag.')
+        return 1
+
+    # check capabilities
+    if response[0] != 0xE1:
+        print('No NDEF container capability.')
+        print('Capability container bytes:', toHexString(response))
+        return 1
+
+    print('NFC Tag Type 2 detected.')
+
+    # read all memory
+    block = 0
+    memory = []
+    while True:
+        #       CLA INS P1  P2      Lc
+        apdu = 'FF  B0  00  {:02X}  04'.format(block)
+        response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+        if (sw1,sw2) != (0x90,0x00):
+            break
+        memory.extend(response)
+        block += 1
+
+    # print spec version, take most significant nibble (major version) and least significant nibble (minor version)
+    spec_version_byte = memory[3 * BLOCK_SIZE + 1]
+    print('Spec version: {}.{}'.format(msn(spec_version_byte), lsn(spec_version_byte)))
+
+    # print memory info
+    data_memory_size = memory[3 * BLOCK_SIZE + 2] * 8
+    print('Total memory: {} bytes in {} blocks'.format(len(memory), len(memory) // BLOCK_SIZE))
+    print('User data memory size: {} bytes'.format(data_memory_size))
+    print('User data blocks: {:02X} to {:02X}'.format(4, 3 + data_memory_size // BLOCK_SIZE))
+    print('Tag configuration blocks: {:02X} to {:02X}'.format(4 + data_memory_size // BLOCK_SIZE, len(memory) // BLOCK_SIZE - 1))
+
+    wac_byte = memory[3 * BLOCK_SIZE + 3]  # wac - write access conditions
+    print('Read access condition: {}'.format(msn(wac_byte)))
+    print('Write access condition: {}'.format(lsn(wac_byte)))
+
+    data_memory = memory[4 * BLOCK_SIZE : 4 * BLOCK_SIZE + data_memory_size]
+
+    tlvs = tlvt2t.parse_bytes_list(data_memory)
+
+    print('NDEF message records:')
+    for t in tlvs:
+        if t.tag == 3:
+            # NDEF TLV
+            for record in ndef.message_decoder(bytearray(t.value)):
+                print(record)
+
+    # print('Memory:', toHexString(memory))
+    # print('Data Memory:', toHexString(data_memory))
+    # print('TLV objects', tlvs)
+
+
+def msn(b):
+    return (b >> 4) & 0xf
+
+def lsn(b):
+    return b & 0xf
+
+if __name__ == '__main__':
+    main()
