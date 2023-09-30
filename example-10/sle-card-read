@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+
+# Copyright 2023 Sergey Stolyarov <sergei@regolit.com>
+#
+# Distributed under New BSD License.
+# 
+# https://opensource.org/license/bsd-3-clause/
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes, PACK
+
+def main() -> int:
+    reader = readers()[0]
+    print('Connected reader: {0}'.format(reader))
+    cardrequest = CardRequest(timeout=None, readers=[reader])
+    print('Waiting for card ...')
+    cardservice = cardrequest.waitforcard()
+    cardservice.connection.connect()
+    print('Card connected.')
+
+    # Instruction "9.3.6.1. SELECT_CARD_TYPE"
+    # write 1 (in "Lc" field) byte, 06 (in DATA block) indicates card type
+    # fields "P1" and "P2" are ignored
+
+    #       CLA INS P1  P2  Lc  DATA
+    apdu = 'FF  A4  00  00  01  06'
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Select failed')
+        return 1
+
+    # Instruction "9.3.6.2. READ_MEMORY_CARD"
+    # Read all 256 bytes in two passes.
+    # First read 32=0x20 (in "Le" field) bytes starting with address 0x00 (in "P2" field)
+    # field "P1" is ignored
+
+    #       CLA INS P1  P2  Le
+    apdu = 'FF  B0  00  00  20'
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Cannot read card data')
+        return 1
+    eeprom_data = response
+
+    # Then read remaining 224=0xE0 (in "Le" field) bytes starting with address 0x20 (in "P2" field)
+    # field "P1" is ignored
+
+    #       CLA INS P1  P2  Le
+    apdu = 'FF  B0  00  20  E0'
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Cannot read card data')
+        return 1
+    eeprom_data.extend(response)
+
+    print('EEPROM memory:')
+    for i in range(0, len(eeprom_data), 32):
+        chunk = eeprom_data[i:i+32]
+        print(' ', toHexString(chunk))
+
+    # Instruction "9.3.6.4. READ_PROTECTION_BITS"
+    # read 0x04 (in "Le" field) bytes of Protection memory
+    # fields "P1" and "P2" are ignored
+
+    #       CLA INS P1  P2  Le
+    apdu = 'FF  B2  00  00  04'
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Cannot read card data')
+        return 1
+    prb_data = response
+
+    print('Protection memory bits:')
+    print('  ', end='')
+    for x in range(32):
+        print('{:02X} '.format(x), end='')
+    print('')
+    protection_bits = [0 for x in range(32)]
+    for k in range(4):
+        b = prb_data[k]
+        for i in range(8):
+            addr = k * 8 + i
+            protection_bits[addr] = b & 1
+            b >>= 1
+    print('  ', end='')
+    for x in range(32):
+        print('{: 2X} '.format(protection_bits[x]), end='')
+    print('')
+
+    # Instruction "9.3.6.3. READ_PRESENTATION_ERROR_COUNTER_MEMORY_CARD (SLE 4442 and SLE 5542)"
+    # read 0x04 (in "Le" field) bytes of Security memory (only EC value is returned)
+    # fields "P1" and "P2" are ignored
+
+    #       CLA INS P1  P2  Le
+    apdu = 'FF  B1  00  00  04'
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Cannot read card data')
+        return 1
+    ec_data = response
+
+    print('EC: {:02X}'.format(ec_data[0]))
+
+    return 0
+
+if __name__ == '__main__':
+    main()

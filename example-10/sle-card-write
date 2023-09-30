@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+
+# Copyright 2023 Sergey Stolyarov <sergei@regolit.com>
+#
+# Distributed under New BSD License.
+# 
+# https://opensource.org/license/bsd-3-clause/
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes, PACK
+
+def main() -> int:
+    reader = readers()[0]
+    print('Connected reader: {0}'.format(reader))
+    cardrequest = CardRequest(timeout=None, readers=[reader])
+    print('Waiting for card ...')
+    cardservice = cardrequest.waitforcard()
+    cardservice.connection.connect()
+    print('Card connected.')
+
+    # Instruction "9.3.6.1. SELECT_CARD_TYPE"
+    # write 1 (in "Lc" field) byte, 06 (in DATA block) indicates card type
+    # fields "P1" and "P2" are ignored
+
+    #       CLA INS P1  P2  Lc  DATA
+    apdu = 'FF  A4  00  00  01  06'
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Select failed')
+        return 1
+
+    # Instruction "9.3.6.7. PRESENT_CODE_MEMORY_CARD (SLE 4442 and SLE 5542)"
+    # write 3 bytes of PSC
+    # field "P1" is ignored
+
+    #       CLA INS P1  P2  Lc  DATA
+    apdu = 'FF  20  00  00  03  FF FF FF'
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x07):
+        print('PSC auth failed')
+        return 1
+
+    # Instruction "9.3.6.5. WRITE_MEMORY_CARD"
+    # write 4 bytes "01 02 03 04" starting with address 0x40 (in "P2" field)
+    # field "P1" is ignored
+
+    print('Writing data ... ', end='')
+    #       CLA INS P1  P2  Lc  DATA
+    apdu = 'FF  D0  00  40  04  01 02 03 04'
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Write memory failed')
+        return 1
+    print('done')
+
+
+    return 0
+
+if __name__ == '__main__':
+    main()
