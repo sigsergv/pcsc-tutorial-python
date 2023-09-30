@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+
+# Copyright 2023 Sergey Stolyarov <sergei@regolit.com>
+#
+# Distributed under New BSD License.
+# 
+# https://opensource.org/license/bsd-3-clause/
+
+import tlvt2t
+import ndef
+import sys
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes, PACK
+
+BLOCK_SIZE = 4
+
+def main() -> int:
+    reader = readers()[0]
+    print('Connected reader: {0}'.format(reader))
+    cardrequest = CardRequest(timeout=None, readers=[reader])
+    print('Waiting for card ...')
+    cardservice = cardrequest.waitforcard()
+    cardservice.connection.connect()
+    print('Card connected.')
+
+    memory = []
+    block = 0
+
+    print('Reading tag ... ', end='')
+
+    # read header: first 16 bytes (4 blocks)
+    apdu = pn532_c_apdu('40 01 30 {:02X}'.format(block))
+    response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Read Binary failed, probably not NFC Type 2 Tag.')
+        return 1
+    response = pn532_r_apdu(response)
+    memory.extend(response[1:])
+    if response[0] != 0:
+        print('Failed to read tag header.')
+        return 1
+
+    data_memory_size = memory[3 * BLOCK_SIZE + 2] * 8
+    data_memory = memory[4 * BLOCK_SIZE : 4 * BLOCK_SIZE + data_memory_size]
+    total_blocks = data_memory_size // 4
+
+    # read remaining memory
+    while True:
+        if block >= total_blocks:
+            break
+        # read segments of memory using PN532-command InDataExchange (code 40 01) and NFC-command READ (code 30)
+        apdu = pn532_c_apdu('40 01 30 {:02X}'.format(block))
+        response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+        if (sw1,sw2) != (0x90,0x00):
+            print('Read Binary failed, probably not NFC Type 2 Tag.')
+            return 1
+        response = pn532_r_apdu(response)
+        if response[0] != 0:
+            break
+        memory.extend(response[1:])
+        block += 4
+
+    print('done')
+
+    tlvs = tlvt2t.parse_bytes_list(data_memory)
+    write_tlvs = []
+
+    for t in tlvs:
+        if t.tag != 1 and t.tag != 2:
+            break
+        write_tlvs.append(t)
+
+    # generate NDEF-message with single record containing URL
+    url = sys.argv[1]
+    record = ndef.UriRecord(url)
+    message = [record]
+    ndef_bytes = b''.join(ndef.message_encoder(message))
+    write_tlvs.append(tlvt2t.TLV(0x03, list(ndef_bytes)))
+    write_tlvs.append(tlvt2t.TLV(0xFE, []))
+    tlv_data = tlvt2t.pack_tlv_list(write_tlvs)
+
+    # calculate padding size and pad with zeroes (size )
+    pad_size = (BLOCK_SIZE - len(tlv_data) % BLOCK_SIZE) % BLOCK_SIZE
+    tlv_data.extend([0] * pad_size)
+
+    print('Writing tag ... ')
+    for i in range(len(tlv_data) // BLOCK_SIZE):
+        chunk = tlv_data[i * BLOCK_SIZE : (i + 1) * BLOCK_SIZE]
+        block = 4 + i
+        apdu = pn532_c_apdu('40 01  A2 {:02X} {}'.format(block, toHexString(chunk)))
+        response, sw1, sw2 = cardservice.connection.transmit(toBytes(apdu))
+        if (sw1,sw2) != (0x90,0x00):
+            print(f'Failed to update block {block}!')
+            return 1
+        response = pn532_r_apdu(response)
+        if response[0] != 0:
+            print('Failed to update block {:02X}'.format(block))
+
+    print('done')
+
+
+def pn532_c_apdu(cmd):
+    cmd_bytes = toBytes(cmd)
+    return 'FF 00 00 00 {:02X} D4 {}'.format(len(cmd_bytes) + 1, toHexString(cmd_bytes))
+
+
+def pn532_r_apdu(b):
+    # cut first two bytes
+    return b[2:]
+
+
+if __name__ == '__main__':
+    main()
+

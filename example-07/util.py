@@ -1,3 +1,10 @@
+
+# Copyright 2023 Sergey Stolyarov <sergei@regolit.com>
+#
+# Distributed under New BSD License.
+#
+# https://opensource.org/license/bsd-3-clause/
+
 def unpack_access_conditions_bits(ac_bytes):
 	bit = lambda pos, b: ((b >> pos) & 1)
 	#ac0 = ac_bytes[0]  # we don't need that byte

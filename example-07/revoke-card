@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 
+# Copyright 2023 Sergey Stolyarov <sergei@regolit.com>
+#
+# Distributed under New BSD License.
+#
+# https://opensource.org/license/bsd-3-clause/
+
+
 import configparser
 
 from smartcard.System import readers
