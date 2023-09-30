@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+
+# Copyright 2023 Sergey Stolyarov <sergei@regolit.com>
+#
+# Distributed under New BSD License.
+# 
+# https://opensource.org/license/bsd-3-clause/
+
+import atexit
+import readline
+import os
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes, PACK
+
+def main() -> int:
+    # repl initialization
+    history_file = os.path.expanduser('~/.apdu-terminal.history')
+    def terminate():
+        print('Exiting...')
+        readline.write_history_file(history_file)
+    atexit.register(terminate)
+    if os.path.exists(history_file):
+        readline.read_history_file(history_file)
+    readline.set_history_length(1000)
+
+    reader = readers()[0]
+    print('Connected reader: {0}'.format(reader))
+    cardrequest = CardRequest(timeout=None, readers=[reader])
+    print('Waiting for card ...')
+    cardservice = cardrequest.waitforcard()
+    cardservice.connection.connect()
+    print('Card connected, starting REPL shell.')
+    print('type "exit" or "quit" to exit program, or press Ctrl+D.')
+
+    while True:
+        try:
+            cmd = input('> ')
+        except EOFError:
+            break
+        if cmd in ('exit', 'quit'):
+            break
+        try:
+            apdu = toBytes(cmd)
+            response, sw1, sw2 = cardservice.connection.transmit(apdu)
+            if len(response) == 0:
+                print('< [empty response]', 'Status:', toHexString([sw1, sw2]))
+            else:
+                print('<', toHexString(response), 'Status:', toHexString([sw1, sw2]))
+        except TypeError:
+            print('<<< Invalid command.')
+
+    return 0
+
+
+if __name__ == '__main__':
+    main()
