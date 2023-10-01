@@ -9,6 +9,7 @@
 import atexit
 import readline
 import os
+import re
 
 from smartcard.System import readers
 from smartcard.CardRequest import CardRequest
@@ -34,17 +35,27 @@ def main() -> int:
     cardservice = cardrequest.waitforcard()
     cardservice.connection.connect()
     print('Card connected, starting REPL shell.')
-    print('type "exit" or "quit" to exit program, or press Ctrl+D.')
+    print('Type "exit" or "quit" to exit program, or press Ctrl+D.')
 
     while True:
         try:
-            cmd = input('> ')
+            cmd = input('APDU% ')
+            # normalization
+            # remove comments starting with '#'
+            cmd = re.sub('#.+', '', cmd)
+            # remove leading and trailing spaces
+            cmd = cmd.strip()
         except EOFError:
             break
         if cmd in ('exit', 'quit'):
             break
+        # ignored commands
+        if cmd in ('',):
+            continue
         try:
             apdu = toBytes(cmd)
+            # output normalized query
+            print('>', toHexString(apdu))
             response, sw1, sw2 = cardservice.connection.transmit(apdu)
             if len(response) == 0:
                 print('< [empty response]', 'Status:', toHexString([sw1, sw2]))
@@ -52,9 +63,8 @@ def main() -> int:
                 print('<', toHexString(response), 'Status:', toHexString([sw1, sw2]))
         except TypeError:
             print('<<< Invalid command.')
-        except CardConnectionException:
-            print('<<< Reader communication error.')
-            break
+        except CardConnectionException as e:
+            print('<<< Reader communication error:', str(e))
 
     return 0
 
