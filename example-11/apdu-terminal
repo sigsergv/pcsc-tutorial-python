@@ -14,6 +14,7 @@ from smartcard.System import readers
 from smartcard.CardRequest import CardRequest
 from smartcard.CardConnection import CardConnection
 from smartcard.util import toHexString, toBytes, PACK
+from smartcard.Exceptions import CardConnectionException
 
 def main() -> int:
     # repl initialization
@@ -51,6 +52,9 @@ def main() -> int:
                 print('<', toHexString(response), 'Status:', toHexString([sw1, sw2]))
         except TypeError:
             print('<<< Invalid command.')
+        except CardConnectionException:
+            print('<<< Reader communication error.')
+            break
 
     return 0
 
