@@ -3,9 +3,26 @@
 import unittest
 import binascii
 
-from bertlv import parse_bytes, Tlv, UnexpectedEndError, InvalidTagError
+from bertlv import parse_bytes, Tlv, UnexpectedEndError, InvalidTagError, InvalidValueError
 
 class TestTlv(unittest.TestCase):
+    def test_object(self):
+        # create Tlv object with tag and bytes
+        t = Tlv(0x10, [0x31, 0x32])
+
+        # create constructed tag with tag and other tags list as value
+        t1 = Tlv(0x10, [0x31])
+        t2 = Tlv(0x11, [0x32])
+        t3 = Tlv(0x12, [0x32, 0x34, 0x35])
+
+        # create without exception
+        t = Tlv(0x35, [t1, t2, t3])
+
+        # expecting exception
+        with self.assertRaises(InvalidValueError) as cm:
+            t = Tlv(0x54, [t1, t2, t3])
+        assert(cm.exception.args == ('Incompatible value (Tlv) for encoding PRIMITIVE',))
+
     def test_parse(self):
 
         with self.assertRaises(UnexpectedEndError):
@@ -60,7 +77,6 @@ class TestTlv(unittest.TestCase):
 
         # leading zeroes
         data = parse_bytes(toBytes("00009F1001318A03414243"))
-        print('data', data)
         assert(data == [Tlv(0x9F10, [0x31]),Tlv(0x8A, [0x41, 0x42, 0x43])])
 
         # between element padding
