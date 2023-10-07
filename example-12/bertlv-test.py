@@ -28,6 +28,9 @@ class TestTlv(unittest.TestCase):
         with self.assertRaises(UnexpectedEndError):
             parse_bytes(toBytes("01"))
 
+        data = parse_bytes([])
+        assert(data == [])
+
         # 1-byte tag
         data = parse_bytes(toBytes("100122"))
         assert(data == [Tlv(0x10, [0x22])])

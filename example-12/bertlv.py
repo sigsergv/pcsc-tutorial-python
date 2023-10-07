@@ -161,7 +161,6 @@ class Parser:
         return length
 
 
-
 def parse_bytes(data):
     """
     Parse list of bytes into a list of Tlv class objects
@@ -179,3 +178,9 @@ def parse_bytes(data):
         res.append(t)
     return res
 
+
+def find_tag(tag, tags):
+    for t in tags:
+        if t.tag == tag:
+            return t
+    return None

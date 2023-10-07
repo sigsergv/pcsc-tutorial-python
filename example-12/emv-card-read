@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+
+# Copyright 2023 Sergey Stolyarov <sergei@regolit.com>
+#
+# Distributed under New BSD License.
+# 
+# https://opensource.org/license/bsd-3-clause/
+
+import bertlv
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes, PACK, HexListToBinString
+
+def main() -> int:
+    reader = readers()[0]
+    print('Connected reader: {0}'.format(reader))
+    cardrequest = CardRequest(timeout=None, readers=[reader])
+    print('Waiting for card ...')
+    cardservice = cardrequest.waitforcard()
+    print('ins')
+    cardservice.connection.connect(protocol=CardConnection.T0_protocol)
+    print('Card connected.')
+
+    # Select PSE first
+    #       CLA INS P1  P2  Lc  DATA
+    apdu = '00  A4  04  00  0E  31 50 41 59 2E 53 59 53 2E 44 44 46 30 31'
+    response, sw1, sw2 = transmit_wrapper(cardservice.connection, toBytes(apdu))
+    if (sw1,sw2) == (0x90,0x00):
+        # take AID from FCI
+        pse_data = response
+        aid = get_AID_from_PSEFCI(cardservice.connection, pse_data)
+        if aid is None:
+            aid = guess_AID(cardservice.connection)
+    elif (sw1,sw2) == (0x6A,0x82):
+        # guess AID
+        aid = guess_AID(cardservice.connection)
+    else:
+        print('Failed to read card.')
+        print('{:02X} {:02X}'.format(sw1,sw2))
+        return 1
+
+    # Select application with name "{aid}"
+    #       CLA INS P1  P2  Lc  DATA
+    apdu = '00  A4  04  00  07  ' + toHexString(aid)
+    response, sw1, sw2 = transmit_wrapper(cardservice.connection, toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('No EMV app found.')
+        return 1
+
+    print(toHexString(response))
+
+    parts = bertlv.parse_bytes(response)
+    fciTlv = bertlv.find_tag(0x6F, parts)
+    piTlv = bertlv.find_tag(0xA5, fciTlv.value)
+    labelTlv = bertlv.find_tag(0x50, piTlv.value)
+    print('Application name: {}'.format(HexListToBinString(labelTlv.value)))
+    langTlv = bertlv.find_tag(0x5F2D, piTlv.value)
+    if langTlv is not None:
+        print('Language preference: {}'.format(HexListToBinString(langTlv.value)))
+    apnameTlv = bertlv.find_tag(0x9F12, piTlv.value)
+    if apnameTlv is not None:
+        print('Application Preferred Name: {}'.format(HexListToBinString(apnameTlv.value)))
+    pdolTlv = bertlv.find_tag(0x9F38, piTlv.value)
+    pdolData = None
+    if pdolTlv is not None:
+        pdolData = pdolTlv.value
+
+    # Start financial transaction
+    # prepare dolData
+
+    return 0
+
+
+def get_AID_from_PSEFCI(connection, data):
+    parts = bertlv.parse_bytes(data)
+    t = bertlv.find_tag(0x6F, parts)
+    if t is None:
+        # expecting FCI template
+        return None
+    # pi means "proprietary information"
+    piTlv = bertlv.find_tag(0xA5, t.value)
+    if piTlv is None:
+        # Cannot find EMV block in PSE FCI
+        return None
+    # piTlv contains data specified in EMV_v4.3 book 1 spec,
+    # section "11.3.4 Data Field Returned in the Response Message"
+    sfiTlv = bertlv.find_tag(0x88, piTlv.value)
+    if sfiTlv is None:
+        # Cannot find SFI block in PSE FCI
+        return None
+    defSfiData = sfiTlv.value
+    sfi = defSfiData[0]
+
+    # READ RECORD, see ISO/IEC 7816-4, section "7.3.3 READ RECORD (S) command"
+    p2 = (sfi << 3) | 4
+    #       CLA INS P1  P2      Le
+    apdu = '00  B2  00  {:02X}  00'.format(p2)
+    apduTpl = toBytes(apdu)
+    foundAIDs = []
+    recordNumber = 1
+    expectedLength = 0
+    while True:
+        apdu = apduTpl
+        apdu[2] = recordNumber  # P1
+        apdu[4] = expectedLength  # Le
+        response, sw1, sw2 = transmit_wrapper(connection, apdu)
+        if sw1 == 0x6C:
+            expectedLength = sw2
+            continue
+        if (sw1,sw2) != (0x90,0x00):
+            break
+        if len(response) > 0:
+            parts = bertlv.parse_bytes(response)
+            psd = bertlv.find_tag(0x70, parts)
+            # psd must have tag 0x70
+            # see EMV_v4.3 book 1, section "12.2.3 Coding of a Payment System Directory"
+            if psd is None:
+                return None
+            for t in psd.value:
+                if t.tag == 0x61:
+                    aidTlv = bertlv.find_tag(0x4F, t.value)
+                    if aidTlv is not None:
+                        foundAIDs.append(aidTlv.value)
+        recordNumber += 1
+        expectedLength = 0
+
+    if len(foundAIDs) > 0:
+        return foundAIDs[0]
+    else:
+        return None
+
+def guess_AID(connection):
+    print('guess')
+    candidateAIDs = [
+        'A0 00 00 00 03 20 10',  # Visa Electron
+        'A0 00 00 00 03 10 10',  # Visa Classic
+        'A0 00 00 00 04 10 10',  # Mastercard
+        'A0 00 00 06 58 10 10',  # MIR Credit
+        'A0 00 00 06 58 20 10'   # MIR Debit
+    ]
+    foundAID = None
+    #          CLA INS P1  P2  Le
+    apduTpl = '00  A4  04  00  07'
+    for aid in candidateAIDs:
+        apdu = apduTpl + aid
+        response, sw1, sw2 = transmit_wrapper(connection, toBytes(apdu))
+        if (sw1,sw2) == (0x90,0x00):
+            foundAID = toBytes(aid)
+            break
+
+    return foundAID
+
+def transmit_wrapper(connection, apdu):
+    response, sw1, sw2 = connection.transmit(apdu)
+    if sw1 == 0x61:
+        response_data = []
+        ne = sw2
+        while True:
+            gr_apdu = '00 C0 00 00 {:02X}'.format(ne)
+            response, sw1, sw2 = connection.transmit(toBytes(gr_apdu))
+            if (sw1,sw2) == (0x90,0x00):
+                response_data.extend(response)
+                break
+            elif sw1 == 0x61:
+                response_data.extend(response)
+                ne = sw2
+                continue
+            else:
+                # error, pass sw1, sw2 back to caller
+                response_data = []
+                break
+
+        return response_data, 0x90, 0x00
+    else:
+        return response, sw1, sw2
+
+
+if __name__ == '__main__':
+    main()
