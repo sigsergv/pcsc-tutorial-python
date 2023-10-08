@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+
+# Copyright 2023 Sergey Stolyarov <sergei@regolit.com>
+#
+# Distributed under New BSD License.
+# 
+# https://opensource.org/license/bsd-3-clause/
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.util import toHexString
+
+def main() -> int:
+	reader = readers()[0]
+	print('Connected reader: {0}'.format(reader))
+	cardrequest = CardRequest(timeout=None, readers=[reader])
+	print('Waiting for the card...')
+	cardservice = cardrequest.waitforcard()
+	cardservice.connection.connect()
+	atr = cardservice.connection.getATR()
+	print('Inserted card with ATR: {0}'.format( toHexString(atr)) )
+	parse_atr(atr)
+	return 0
+
+
+class InvalidATRError(Exception): pass
+
+class InterfaceBytes():
+	def __init__(self, TA, TB, TC, TD, T):
+		self.TA = TA
+		self.TB = TB
+		self.TC = TC
+		self.TD = TD
+		self.T = T
+
+def parse_atr(data):
+	if len(data) < 2:
+		raise(InvalidATRError('ATR bytes list is too short'))
+	# check TS byte
+	if data[0] != 0x3B and data[0] != 0x3F:
+		raise InvalidATRError('Byte TS is incorrect')
+
+	allInterfaceBytes = []
+	historicalBytesLength = 0
+	historicalBytes = []
+
+	# check format byte T0
+	T0 = data[1]
+	Y = (T0 >> 4) & 0xF;
+	historicalBytesLength = T0 & 0xF
+
+	# read interface bytes
+	p = 2
+	T = 0
+	while True:
+		TA = None
+		TB = None
+		TC = None
+		TD = None
+		# check is next byte is TAi
+		if (Y & 1) != 0:
+			TA = data[p]
+			p += 1
+		# check is next byte is TBi
+		if (Y & 2) != 0:
+			TB = data[p];
+			p += 1
+		# check is next byte is TCi
+		if (Y & 4) != 0:
+			TC = data[p]
+			p += 1
+		# check is next byte is TDi
+		if (Y & 8) != 0:
+			TD = data[p]
+			p += 1
+		allInterfaceBytes.append(InterfaceBytes(TA, TB, TC, TD, T))
+
+		if TD is None:
+			break
+
+		T = TD & 0xF
+		Y = (TD >> 4) & 0xF
+
+	historicalBytes = data[p : p + historicalBytesLength]
+
+	# print interface bytes
+	print('Interface bytes:')
+	for i,b in enumerate(allInterfaceBytes, 1):
+		if b.TA is not None:
+			print('  TA{} = {:02X} (T = {})'.format(i, b.TA, b.T))
+		if b.TB is not None:
+			print('  TB{} = {:02X} (T = {})'.format(i, b.TB, b.T))
+		if b.TC is not None:
+			print('  TC{} = {:02X} (T = {})'.format(i, b.TC, b.T))
+		if b.TD is not None:
+			print('  TD{} = {:02X} (T = {})'.format(i, b.TD, b.T))
+
+	print('Historical bytes length (K): {}'.format(historicalBytesLength))
+	print('Historical bytes (raw): {}'.format(toHexString(historicalBytes)))
+
+	if historicalBytes[0] == 0x80:
+		# parse all as COMPACT-TLV objects
+		p = 1
+		while True:
+			if p == historicalBytesLength:
+				break
+			if p > historicalBytesLength:
+				raise('Incorrect historical bytes structure.')
+			objLen = historicalBytes[p] & 0xF
+			objTag = ((historicalBytes[p] >> 4) & 0xF) + 0x40
+			objData = historicalBytes[p + 1 : p + objLen + 1]
+			printHistoricalBytesValue(objTag, objData)
+			p += objLen + 1
+
+	elif historicalBytes[0] == 0x0:
+		pass
+	else:
+		print('Proprietary historical bytes structure.');
+
+
+def printHistoricalBytesValue(tag, value):
+	print('  TAG: {:02X}; DATA: {}'.format(tag, toHexString(value)))
+
+	if tag == 0x41:
+		print('    Country code')
+	elif tag == 0x42:
+		pass
+	elif tag == 0x43:
+		b = value[0]
+		print('    Card service data:')
+		print('      Application selection by full DF name: {}'.format(b2yn(b & 0x80)))
+		print('      Application selection by partial DF name: {}'.format(b2yn(b & 0x40)))
+		print('      BER-TLV data objects in EF.DIR: {}'.format(b2yn(b & 0x20)))
+		print('      BER-TLV data objects in EF.ATR: {}'.format(b2yn(b & 0x10)))
+		f = (b >> 1) & 0x7
+		s = ''
+		if f == 0x4:
+			s = 'by the READ BINARY command (transparent structure)'
+		elif f == 0:
+			s = 'by the READ RECORD (S) command (record structure)'
+		elif f == 0x2:
+			s = 'by the GET DATA command (TLV structure)'
+		print('      EF.DIR and EF.ATR access services: {}'.format(s))
+		if (b & 1) == 0:
+			print('      Card with MF')
+		else:
+			print('      Card without MF')
+	elif tag == 0x44:
+		print('    Initial access data')
+	elif tag == 0x45:
+		print('    Card issuer\'s data')
+	elif tag == 0x46:
+		print('    Pre-issuing data')
+	elif tag == 0x47:
+		print('    Card capabilities')
+		for c in getCapabilies(value):
+			print('      {}'.format(c))
+	elif tag == 0x48:
+		print('    Status information:')
+		for c in getStatusIndicatorBytes(value):
+			print('      {}'.format(c))
+	elif tag == 0x4D:
+		print('    Extended header list')
+	elif tag == 0x4F:
+		print('    Application identifier')
+
+
+def getCapabilies(data):
+	items = []
+	if len(data) >= 1:
+		sub = []
+		b = data[0]
+		if b & 0x80 != 0:
+			sub.append('by full DF name')
+		if b & 0x40 != 0:
+			sub.append('by partial DF name')
+		if b & 0x20 != 0:
+			sub.append('by path')
+		if b & 0x10 != 0:
+			sub.append('by file identifier')
+		if b & 0x8 != 0:
+			sub.append('Implicit DF selection')
+		if len(sub) > 0:
+			items.append('DF selection: {}'.format(', '.join(sub)))
+		items.append('Short EF identifier supported: {}'.format(b2yn(b & 0x4)))
+		items.append('Record number supported: {}'.format(b2yn(b & 0x2)))
+		items.append('Record identifier supported: {}'.format(b2yn(b & 0x1)))
+
+	if len(data) >= 2:
+		b = data[1]
+		items.append('EFs of TLV structure supported: {}'.format(b2yn(b & 0x80)))
+		s = 'Behaviour of write functions: '
+		x = (b >> 5) & 0x3
+		if x == 0:
+			s += 'One-time write'
+		elif x == 1:
+			s += 'Proprietary'
+		elif x == 2:
+			s += 'Write OR'
+		elif x == 3:
+			s += 'Write AND'
+		items.append(s)
+
+		s = "Value 'FF' for the first byte of BER-TLV tag fields: "
+		if (b & 0x10) == 0x10:
+			s += 'valie'
+		else:
+			s += 'invalid'
+		items.append(s)
+
+	if len(data) >= 2:
+		b = data[2]
+		items.append('Commands chaining: {}'.format(b2yn(b & 0x80)))
+		items.append('Extended Lc and Le fields: {}'.format(b2yn(b & 0x40)))
+		s = 'Logical channel number assignment: '
+		x = (b >> 3) & 0x3
+		if x == 0:
+			s += 'No logical channel'
+		elif x == 2:
+			s += 'by the card'
+		elif x == 3:
+			s += 'by the interface device'
+		items.append(s)
+
+		s = 'Maximum number of logical channels: {}'.format(4*((b>>2)&1) + 2*((b>>1)&1) + (b&1) + 1)
+		items.append(s)
+
+	return items
+
+
+def getStatusIndicatorBytes(data):
+	items = []
+	data_len = len(data)
+	if data_len == 1 or data_len == 3:
+		b = data[0]
+		s = ''
+		if b == 0:
+			s = 'No information given'
+		elif b == 1:
+			s = 'Creation state'
+		elif b == 3:
+			s = 'Initialisation state'
+		elif (b & 0x5) == 0x5:
+			s = 'Operational state (activated)'
+		elif (b & 0x5) == 0x4:
+			s = 'Operational state (deactivated)'
+		elif (b & 0xC) == 0xC:
+			s = 'Termination state'
+		elif (b & 0xF0) != 0:
+			s = 'Proprietary'
+		items.append('LCS (life cycle status): {}'.format(s))
+	if data_len == 2 or data_len == 3:
+		items.append('Status word: {}'.format(toHexString(data[-2:])))
+	return items
+
+
+def b2yn(x):
+	if x == 0:
+		return 'no'
+	else:
+		return 'yes'
+
+
+if __name__ == '__main__':
+	main()
