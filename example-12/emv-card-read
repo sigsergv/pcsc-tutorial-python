@@ -7,6 +7,7 @@
 # https://opensource.org/license/bsd-3-clause/
 
 import bertlv
+import emvutil
 
 from smartcard.System import readers
 from smartcard.CardRequest import CardRequest
@@ -19,11 +20,10 @@ def main() -> int:
     cardrequest = CardRequest(timeout=None, readers=[reader])
     print('Waiting for card ...')
     cardservice = cardrequest.waitforcard()
-    print('ins')
-    cardservice.connection.connect(protocol=CardConnection.T0_protocol)
+    cardservice.connection.connect()
     print('Card connected.')
 
-    # Select PSE first
+    # Select PSE first (for contact cards, "1PAY.SYS.DDF01")
     #       CLA INS P1  P2  Lc  DATA
     apdu = '00  A4  04  00  0E  31 50 41 59 2E 53 59 53 2E 44 44 46 30 31'
     response, sw1, sw2 = transmit_wrapper(cardservice.connection, toBytes(apdu))
@@ -34,11 +34,26 @@ def main() -> int:
         if aid is None:
             aid = guess_AID(cardservice.connection)
     elif (sw1,sw2) == (0x6A,0x82):
-        # guess AID
-        aid = guess_AID(cardservice.connection)
+        # try with PPSE "2PAY.SYS.DDF01" for contactless cards
+        apdu = '00  A4  04  00  0E  32 50 41 59 2E 53 59 53 2E 44 44 46 30 31'
+        response, sw1, sw2 = transmit_wrapper(cardservice.connection, toBytes(apdu))
+        if (sw1,sw2) == (0x90,0x00):
+            # take AID from FCI
+            pse_data = response
+            aid = get_AID_from_PSEFCI(cardservice.connection, pse_data)
+            if aid is None:
+                aid = guess_AID(cardservice.connection)
+        elif (sw1,sw2) == (0x6A,0x82):
+            # guess AID
+            print('guessed')
+            aid = guess_AID(cardservice.connection)
     else:
         print('Failed to read card.')
         print('{:02X} {:02X}'.format(sw1,sw2))
+        return 1
+
+    if aid is None:
+        print("Unable to find proper AID")
         return 1
 
     # Select application with name "{aid}"
@@ -49,26 +64,123 @@ def main() -> int:
         print('No EMV app found.')
         return 1
 
-    print(toHexString(response))
+    # print(toHexString(response))
 
     parts = bertlv.parse_bytes(response)
     fciTlv = bertlv.find_tag(0x6F, parts)
     piTlv = bertlv.find_tag(0xA5, fciTlv.value)
-    labelTlv = bertlv.find_tag(0x50, piTlv.value)
-    print('Application name: {}'.format(HexListToBinString(labelTlv.value)))
-    langTlv = bertlv.find_tag(0x5F2D, piTlv.value)
-    if langTlv is not None:
-        print('Language preference: {}'.format(HexListToBinString(langTlv.value)))
-    apnameTlv = bertlv.find_tag(0x9F12, piTlv.value)
-    if apnameTlv is not None:
-        print('Application Preferred Name: {}'.format(HexListToBinString(apnameTlv.value)))
-    pdolTlv = bertlv.find_tag(0x9F38, piTlv.value)
+
+    # read all fields from FCI Proprietary Template
     pdolData = None
-    if pdolTlv is not None:
-        pdolData = pdolTlv.value
+    for t in piTlv.value:
+        if t.tag == 0x50:
+            print('Application name: {}'.format(HexListToBinString(t.value)))
+        elif t.tag == 0x87:
+            print('Application Priority Indicator: priority={}, confirmation required={}'
+                .format(t.value[0] & 0x0F, (t.value[0] >> 7 == 1)))
+        elif t.tag == 0x9F38:
+            print('PDOL is present')
+            pdolData = t.value
+        elif t.tag == 0x5F2D:
+            print('Language preference: {}'.format(HexListToBinString(t.value)))
+        elif t.tag == 0x9F11:
+            print('Issuer Code Table Index: ISO 8859-{}'.format(t.value[0]))
+        elif t.tag == 0x9F12:
+            print('Application Preferred Name: {}'.format(HexListToBinString(t.value)))
+        elif t.tag == 0xBF0C:
+            print('FCI Issuer Discretionary Data is present')
+        else:
+            print('Unknown tag {:X}: '.format(t.tag, toHexString(t.value)))
 
     # Start financial transaction
     # prepare dolData
+    dolData = [0x83, 0x00]
+    if pdolData is not None:
+        # parse PDOL data
+        lengthByte = False
+        totalLength = 0
+        for b in pdolData:
+            if lengthByte:
+                totalLength += b
+                lengthByte = False
+                continue
+            if b & 0x1F != 0x1F:
+                # ^^^^^^ last five bits of "b" are not all 1s, so this byte is last one
+                # in tag block, so consider next byte as field length
+                lengthByte = True
+        dolData[1] = totalLength
+        dolData.extend([0] * totalLength)
+
+    # Send command "GET PROCESSING OPTIONS"
+    #       CLA INS P1  P2  Lc      DATA
+    apdu = '80 A8   00  00  {:02X}  {}'.format(len(dolData), toHexString(dolData))
+    response, sw1, sw2 = transmit_wrapper(cardservice.connection, toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('GET PROCESSING OPTIONS failed')
+        return 1
+
+    aipData = None
+    aflData = None
+    parts = bertlv.parse_bytes(response)
+    t = parts[0]
+    if t.tag == 0x77:
+        x = bertlv.find_tag(0x82, t.value)
+        if x is not None:
+            aipData = x.value
+        x = bertlv.find_tag(0x94, t.value)
+        if x is not None:
+            aflData = x.value
+    elif t.tag == 0x80:
+        aipData = t.value[0:2]
+        aflData = t.value[2:]
+
+    print('Application Interchange Profile')
+    print('  SDA supported: {}'.format('no' if (aipData[0] & 0x40)==0 else 'yes'))
+    print('  DDA supported: {}'.format('no' if (aipData[0] & 0x20)==0 else 'yes'))
+    print('  Cardholder verification is supported: {}'.format('no' if (aipData[0] & 0x10)==0 else 'yes'))
+    print('  Terminal risk management is to be performed: {}'.format('no' if (aipData[0] & 0x8)==0 else 'yes'))
+    print('  Issuer authentication is supported: {}'.format('no' if (aipData[0] & 0x4)==0 else 'yes'))
+    print('  CDA supported: {}'.format('no' if (aipData[0] & 0x1)==0 else 'yes'))
+
+    # read AFL points
+    readObjects = []
+    aflPartsCount = len(aflData) // 4
+    for i in range(aflPartsCount):
+        startByte = i * 4
+        sfi = aflData[startByte] >> 3
+        firstSfiRec = aflData[startByte + 1]
+        lastSfiRec = aflData[startByte + 2]
+        offlineAuthRecNumber = aflData[startByte + 3]  # we don't use this value
+
+        #               CLA INS P1  P2  Le
+        apdu = toBytes('00  B2  00  00  00')
+        for j in range(firstSfiRec, lastSfiRec + 1):
+            # set Le=0
+            apdu[4] = 0
+            # set P1, record number to read
+            apdu[2] = j
+            # set P2, coding of this parameters defined in ISO 7816-4, section "READ RECORD (S) command"
+            p2 = (sfi << 3) | 4
+            apdu[3] = p2
+            response, sw1, sw2 = transmit_wrapper(cardservice.connection, apdu)
+            if sw1 == 0x6C:
+                # set new Le and repeat command
+                apdu[4] = sw2
+                response, sw1, sw2 = transmit_wrapper(cardservice.connection, apdu)
+            if (sw1,sw2) != (0x90,0x00):
+                print('Failed to read record {} in SFI {}'.format(j, sfi))
+                continue
+            parts = bertlv.parse_bytes(response)
+            rectplTlv = bertlv.find_tag(0x70, parts)
+            if rectplTlv is None:
+                print('Failed to parse record {} in SFI {}'.format(j, sfi))
+                continue
+            for t in rectplTlv.value:
+                readObjects.append(t)
+
+    print('EMV objects:')
+    for t in readObjects:
+        print('  {}: {}'.format( emvutil.emv_object_name(t.tag), emvutil.emv_object_repr(t.tag, t.value) ))
 
     return 0
 
@@ -132,7 +244,6 @@ def get_AID_from_PSEFCI(connection, data):
         return None
 
 def guess_AID(connection):
-    print('guess')
     candidateAIDs = [
         'A0 00 00 00 03 20 10',  # Visa Electron
         'A0 00 00 00 03 10 10',  # Visa Classic
