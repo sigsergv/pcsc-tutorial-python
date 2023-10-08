@@ -208,7 +208,7 @@ def getCapabilies(data):
 			s += 'invalid'
 		items.append(s)
 
-	if len(data) >= 2:
+	if len(data) >= 3:
 		b = data[2]
 		items.append('Commands chaining: {}'.format(b2yn(b & 0x80)))
 		items.append('Extended Lc and Le fields: {}'.format(b2yn(b & 0x40)))
