@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+
+# Copyright 2023 Sergey Stolyarov <sergei@regolit.com>
+#
+# Distributed under New BSD License.
+# 
+# https://opensource.org/license/bsd-3-clause/
+
+import bertlv
+
+from smartcard.System import readers
+from smartcard.CardRequest import CardRequest
+from smartcard.CardConnection import CardConnection
+from smartcard.util import toHexString, toBytes, PACK, HexListToBinString
+
+def main() -> int:
+    reader = readers()[0]
+    print('Connected reader: {0}'.format(reader))
+    cardrequest = CardRequest(timeout=None, readers=[reader])
+    print('Waiting for card ...')
+    cardservice = cardrequest.waitforcard()
+    cardservice.connection.connect()
+    print('Card connected.')
+
+    # select MF and fetch FCP
+    #       CLA INS P1  P2  Lc  DATA
+    apdu = '00  A4  00  04  02  3F 00'
+    response, sw1, sw2 = transmit_wrapper(cardservice.connection, toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Failed to read MF FCP Template')
+        return 1
+
+    parts = bertlv.parse_bytes(response)
+    mf_fcp = bertlv.find_tag(0x62, parts)
+    if mf_fcp is None:
+        print('Failed to parse MF FCP Template')
+        return 1
+
+    print('MF FCP data:')
+    for tlv in mf_fcp.value:
+        if tlv.tag == 0x82:
+            print('  File descriptor: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag == 0x83:
+            print('  File identifier: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag == 0x84:
+            print('  DF name (AID): {}'.format(toHexString(tlv.value)))
+        elif tlv.tag == 0xA5:
+            print('  Proprietary information:')
+            for x in tlv.value:
+                print('    0x{:X}: {}'.format(x.tag, toHexString(x.raw_value)))
+        elif tlv.tag == 0x8A:
+            print('  Life Cycle Status Integer: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag in (0x8B, 0x8C, 0xAB):
+            print('  Security attributes: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag == 0xC6:
+            print('  PIN Status Template DO: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag == 0x81:
+            print('  Total file size: {}'.format(toHexString(tlv.value)))
+        else:
+            print('  0x{X}: {}'.format(tlv.tag, tlv.raw_value))
+
+    # read EF.DIR
+    #       CLA INS P1  P2  Lc  DATA
+    apdu = '00  A4  00  04  02 2F 00'
+    response, sw1, sw2 = transmit_wrapper(cardservice.connection, toBytes(apdu))
+    if (sw1,sw2) != (0x90,0x00):
+        print('Failed to select EF.DIR')
+        return 1
+
+    print('\nEF.DIR:')
+    parts = bertlv.parse_bytes(response)
+    efdir_fcp = bertlv.find_tag(0x62, parts)
+    if efdir_fcp is None:
+        print('Failed to parse EF.DIR FCP Template')
+        return 1
+    for tlv in efdir_fcp.value:
+        if tlv.tag == 0x82:
+            print('  File descriptor: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag == 0x83:
+            print('  File identifier: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag == 0xA5:
+            print('  Proprietary information:')
+            for x in tlv.value:
+                print('    0x{:X}: {}'.format(x.tag, toHexString(x.raw_value)))
+        elif tlv.tag == 0x8A:
+            print('  Life Cycle Status Integer: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag in (0x8B, 0x8C, 0xAB):
+            print('  Security attributes: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag == 0x80:
+            print('  File size: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag == 0x81:
+            print('  Total file size: {}'.format(toHexString(tlv.value)))
+        elif tlv.tag == 0x88:
+            print('  Short file identifier: {}'.format(toHexString(tlv.value)))
+        else:
+            print('  0x{:X}: {}'.format(tlv.tag, toHexString(tlv.raw_value)))
+
+    # read records
+    efdir_records = []
+    while True:
+        #                    CLA INS P1  P2  Lc
+        apduBytes = toBytes('00  B2  00  02  00')
+        response, sw1, sw2 = transmit_wrapper(cardservice.connection, apduBytes)
+        if sw1 == 0x6C:
+            # set new Le and repeat command
+            apduBytes[4] = sw2
+            response, sw1, sw2 = transmit_wrapper(cardservice.connection, apduBytes)
+        if (sw1,sw2) == (0x6A,0x83):
+            break
+        elif (sw1,sw2) != (0x90,0x00):
+            print('Failed to read record')
+            break
+        parts = bertlv.parse_bytes(response)
+        app_record = bertlv.find_tag(0x61, parts)
+        if app_record is not None:
+            efdir_records.append(app_record)
+
+    print('EF.DIR records:')
+    for i,tlv in enumerate(efdir_records, 1):
+        print(f'Record {i}')
+        for x in tlv.value:
+            if x.tag == 0x4F:
+                print('  AID: {}'.format(toHexString(x.value)))
+            elif x.tag == 0x50:
+                print('  Application label: {}'.format(HexListToBinString(x.value)))
+            else:
+                print('  0x{:X}: {}'.format(x.tag, toHexString(x.raw_value)))
+
+
+def transmit_wrapper(connection, apdu):
+    response, sw1, sw2 = connection.transmit(apdu)
+    if sw1 == 0x61:
+        response_data = []
+        ne = sw2
+        while True:
+            gr_apdu = '00 C0 00 00 {:02X}'.format(ne)
+            response, sw1, sw2 = connection.transmit(toBytes(gr_apdu))
+            if (sw1,sw2) == (0x90,0x00):
+                response_data.extend(response)
+                break
+            elif sw1 == 0x61:
+                response_data.extend(response)
+                ne = sw2
+                continue
+            else:
+                # error, pass sw1, sw2 back to caller
+                response_data = []
+                break
+
+        return response_data, 0x90, 0x00
+    else:
+        return response, sw1, sw2
+
+
+if __name__ == '__main__':
+    main()
